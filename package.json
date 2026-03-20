@@ -1,0 +1,29 @@
+{
+  "name": "responio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered omnichannel conversation management platform",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "infra:up": "docker compose -f infrastructure/docker/docker-compose.infra.yml up -d",
+    "infra:down": "docker compose -f infrastructure/docker/docker-compose.infra.yml down",
+    "infra:logs": "docker compose -f infrastructure/docker/docker-compose.infra.yml logs -f",
+    "db:migrate": "pnpm --filter @responio/inbox rails db:migrate",
+    "db:seed": "pnpm --filter @responio/inbox rails db:seed"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "prettier": "^3.2.0",
+    "eslint": "^8.57.0"
+  }
+}

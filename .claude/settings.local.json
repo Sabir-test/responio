@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/**)",
+      "Bash(unzip -q \"/home/mbs/opt/dev/responio/respond-io-clone-prd-v3.docx\" -d docx_extracted)",
+      "Bash(unzip:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

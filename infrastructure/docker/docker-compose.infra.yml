@@ -1,0 +1,270 @@
+version: "3.9"
+
+# Responio — Local Infrastructure Stack
+# Phase 1 core services: PostgreSQL, Redis, NATS JetStream, MinIO, Traefik
+#
+# Usage:
+#   docker compose -f infrastructure/docker/docker-compose.infra.yml up -d
+#   docker compose -f infrastructure/docker/docker-compose.infra.yml logs -f [service]
+
+networks:
+  responio-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  minio_data:
+  grafana_data:
+  prometheus_data:
+  loki_data:
+
+services:
+  # ──────────────────────────────────────────────
+  # PostgreSQL 16 with pgvector + pg_trgm
+  # Primary database — multi-tenant with RLS
+  # ──────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: responio-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-responio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_change_in_prod}
+      POSTGRES_DB: ${POSTGRES_DB:-responio_development}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - responio-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-responio} -d ${POSTGRES_DB:-responio_development}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_level=logical
+        -c max_wal_senders=3
+        -c wal_keep_size=1GB
+        -c log_min_duration_statement=1000
+
+  # ──────────────────────────────────────────────
+  # Redis 7 — Cache, pub/sub, Sidekiq job queues
+  # ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: responio-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --requirepass ${REDIS_PASSWORD:-dev_redis_password}
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --appendonly yes
+        --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - responio-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dev_redis_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # NATS JetStream — Event bus (central nervous system)
+  # Streams: conversation.*, message.*, contact.*, workflow.*, ai.*, billing.*
+  # ──────────────────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    container_name: responio-nats
+    restart: unless-stopped
+    command: >
+      -js
+      -sd /data
+      -m 8222
+      -p 4222
+      --cluster_name responio-cluster
+      --name nats-1
+    volumes:
+      - nats_data:/data
+    ports:
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # HTTP monitoring
+    networks:
+      - responio-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # MinIO — S3-compatible object storage
+  # Media files, document uploads, knowledge base sources
+  # ──────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: responio-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-responio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dev_minio_password}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console
+    networks:
+      - responio-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO bucket initialization
+  minio-init:
+    image: minio/mc:latest
+    container_name: responio-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-responio_admin} ${MINIO_ROOT_PASSWORD:-dev_minio_password};
+        mc mb -p local/responio-media;
+        mc mb -p local/responio-documents;
+        mc mb -p local/responio-exports;
+        mc mb -p local/responio-backups;
+        mc anonymous set download local/responio-media;
+        echo 'MinIO buckets initialized';
+      "
+    networks:
+      - responio-net
+
+  # ──────────────────────────────────────────────
+  # Traefik — Reverse proxy + TLS termination
+  # ──────────────────────────────────────────────
+  traefik:
+    image: traefik:v3.0
+    container_name: responio-traefik
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=responio-net"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@responio.io}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+      - "--metrics.prometheus=true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/letsencrypt:/letsencrypt
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard (dev only)
+    networks:
+      - responio-net
+
+  # ──────────────────────────────────────────────
+  # Monitoring Stack — Grafana + Prometheus + Loki
+  # ──────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: responio-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    networks:
+      - responio-net
+
+  loki:
+    image: grafana/loki:latest
+    container_name: responio-loki
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      - "3100:3100"
+    networks:
+      - responio-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: responio-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-dev_grafana_password}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3030:3000"
+    networks:
+      - responio-net
+    depends_on:
+      - prometheus
+      - loki
+
+  # ──────────────────────────────────────────────
+  # ClickHouse — Analytics database
+  # (Phase 2 — kept here for full stack bring-up)
+  # ──────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: responio-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-responio_analytics}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-responio}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dev_clickhouse_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ./init-scripts/clickhouse:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9009:9000"   # Native TCP interface
+    networks:
+      - responio-net
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    profiles:
+      - analytics  # Start with: docker compose --profile analytics up -d
