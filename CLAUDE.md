@@ -41,7 +41,7 @@ responio/
 | Workflow Builder UI | React Flow |
 | Inbox Backend | Ruby on Rails (Chatwoot fork) |
 | New Services | Node.js + TypeScript |
-| Workflow Engine | **See ADR-001** — n8n (headless) or Temporal.io |
+| Workflow Engine | n8n (headless) — customers use React Flow UI, n8n runs internally |
 | Event Bus | NATS JetStream |
 | Primary DB | PostgreSQL 16 + pgvector + RLS |
 | Analytics DB | ClickHouse |
@@ -68,11 +68,28 @@ Priority tasks (see docs/stories/phase-1-backlog.md):
 6. WhatsApp BSP application (MUST start immediately)
 
 ## Critical Open Decisions (Block Phase 1)
-1. **Workflow Engine** — n8n (headless) vs Temporal.io → see `docs/architecture/ADR-001-workflow-engine.md`
+1. **Workflow Engine** — ✅ DECIDED: n8n headless (see ADR-001)
 2. **Cloud Provider** — AWS EKS vs Hetzner K3s
 3. **WhatsApp BSP** — 360dialog + Twilio (dual)
 4. **Auth Provider** — Authentik (recommended)
 5. **Phase 1 Hosting** — K3s on 3 VPS nodes (recommended)
+
+## n8n Integration Architecture
+n8n runs as an **internal service only** — customers NEVER see n8n UI.
+Customer-facing interface is our React Flow visual workflow builder.
+
+Flow:
+```
+NATS event → Bridge service → n8n webhook trigger → n8n workflow executes
+                                                           ↓
+                                              n8n HTTP nodes call platform action API
+                                              (POST /api/v1/actions/*)
+```
+
+Key files:
+- `services/workflow/src/n8n/` — n8n API client, workflow translator, bridge
+- `services/workflow/src/actions/` — platform action endpoints (called by n8n)
+- `packages/workflow-dsl/` — React Flow ↔ n8n JSON translation types
 
 ## Multi-Tenancy Rules
 - EVERY database table MUST have `tenant_id` (account_id) column

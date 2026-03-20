@@ -1,9 +1,11 @@
 # ADR-001: Workflow Engine Selection
 
-**Status**: OPEN — Decision Required from M.Sabir
-**Date**: 2026-03-20
-**Deciders**: M.Sabir, Architect
-**Impact**: High — blocks Phase 2 workflow development
+**Status**: ACCEPTED — n8n headless
+**Date**: 2026-03-21
+**Deciders**: M.Sabir
+**Impact**: High — unblocks Phase 2 workflow development
+
+**Decision**: Option B — n8n deployed in headless mode (UI disabled). Customers interact with our React Flow builder only; n8n runs as an internal execution engine. A commercial license agreement with n8n GmbH is required before production launch to comply with the Sustainable Use License.
 
 ---
 

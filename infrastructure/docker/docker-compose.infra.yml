@@ -268,3 +268,71 @@ services:
         hard: 262144
     profiles:
       - analytics  # Start with: docker compose --profile analytics up -d
+
+  # ──────────────────────────────────────────────
+  # n8n — Headless workflow execution engine
+  # Phase 2 feature. UI is DISABLED — customers use React Flow builder.
+  # n8n runs as an internal service; workflows are created via API only.
+  # ⚠ Requires commercial license before production use.
+  # ──────────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: responio-n8n
+    restart: unless-stopped
+    environment:
+      # Disable the n8n UI entirely — headless mode
+      N8N_DISABLE_UI: "true"
+      N8N_EDITOR_BASE_URL: ""
+
+      # Database — separate schema from main app DB
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-responio_development}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-responio}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_change_in_prod}
+      DB_POSTGRESDB_SCHEMA: n8n  # Isolated schema, not public
+
+      # Security
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-dev_n8n_encryption_key_change_in_prod}
+      N8N_USER_MANAGEMENT_DISABLED: "true"
+
+      # Webhook base URL — n8n must know its public URL for webhook registration
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678}
+      N8N_WEBHOOK_BASE_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678}
+
+      # API
+      N8N_API_KEY: ${N8N_API_KEY:-dev_n8n_api_key_change_in_prod}
+
+      # Execution settings
+      EXECUTIONS_PROCESS: main
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none     # Save disk space — we track via NATS
+      EXECUTIONS_DATA_MAX_AGE: 168               # 7 days retention
+      EXECUTIONS_DATA_PRUNE: "true"
+
+      # Disable telemetry
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+
+      # Log level
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-warn}
+
+      # Timezone
+      GENERIC_TIMEZONE: UTC
+      TZ: UTC
+    ports:
+      - "5678:5678"   # Internal only — NOT exposed via Traefik
+    networks:
+      - responio-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    profiles:
+      - workflow  # Start with: docker compose --profile workflow up -d
