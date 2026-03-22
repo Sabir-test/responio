@@ -7,7 +7,16 @@
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "test:integration": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "test:security": {
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "lint": {},
     "typecheck": {
