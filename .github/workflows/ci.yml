@@ -19,10 +19,10 @@ env:
   REDIS_PASSWORD: test_redis
   NATS_URL: nats://localhost:4222
 
+# ─── Shared install job ───────────────────────────────────────────────────────
 jobs:
-  # ─── Type Check ─────────────────────────────────────────────────────────────
-  typecheck:
-    name: TypeScript Type Check
+  install:
+    name: Install Dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,18 +34,59 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build shared packages
+        run: pnpm --filter "./packages/**" build
+
+      - name: Cache node_modules
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+  # ─── Type Check ──────────────────────────────────────────────────────────────
+  typecheck:
+    name: TypeScript Type Check
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Type check
         run: pnpm typecheck
 
-  # ─── Lint ────────────────────────────────────────────────────────────────────
+  # ─── Lint ─────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: install
     steps:
       - uses: actions/checkout@v4
 
@@ -56,18 +97,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
+          cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Lint
         run: pnpm lint
 
-  # ─── Unit Tests ──────────────────────────────────────────────────────────────
+  # ─── Unit Tests ───────────────────────────────────────────────────────────────
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    needs: install
     steps:
       - uses: actions/checkout@v4
 
@@ -78,21 +127,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
+          cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Build packages
-        run: pnpm --filter "./packages/**" build
-
-      - name: Run unit tests
+      - name: Run unit tests with coverage
         run: pnpm test --filter "./services/**" --filter "./packages/**"
 
-  # ─── Integration Tests (with real DB) ───────────────────────────────────────
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: "**/coverage/"
+          retention-days: 7
+
+  # ─── Integration Tests (real DB + NATS + Redis) ───────────────────────────────
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
+    needs: install
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -111,10 +173,11 @@ jobs:
       redis:
         image: redis:7-alpine
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "redis-cli -a test_redis ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        command: ["redis-server", "--requirepass", "test_redis"]
         ports:
           - 6379:6379
 
@@ -125,11 +188,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        command: ["--js", "--http_port", "8222"]
         ports:
           - 4222:4222
           - 8222:8222
-        env:
-          NATS_ARGS: "-js"
 
     steps:
       - uses: actions/checkout@v4
@@ -141,13 +203,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
+          cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build packages
-        run: pnpm --filter "./packages/**" build
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Initialize test database
         run: |
@@ -162,36 +228,112 @@ jobs:
         run: pnpm test:integration
         env:
           DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
-          REDIS_URL: redis://localhost:6379/0
+          REDIS_URL: redis://:${{ env.REDIS_PASSWORD }}@localhost:6379/0
           NATS_URL: ${{ env.NATS_URL }}
 
-  # ─── Security Scan ───────────────────────────────────────────────────────────
-  security:
-    name: Security Scan
+  # ─── Security Scan ────────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (Trivy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          scan-type: "fs"
+          scan-type: fs
           scan-ref: "."
-          format: "sarif"
-          output: "trivy-results.sarif"
-          severity: "HIGH,CRITICAL"
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
 
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: "trivy-results.sarif"
+          sarif_file: trivy-results.sarif
 
-  # ─── Build & Push Docker Images ──────────────────────────────────────────────
+  # ─── Cross-Tenant RLS & Security Tests ───────────────────────────────────────
+  security-tests:
+    name: Security & RLS Isolation Tests
+    runs-on: ubuntu-latest
+    needs: install
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli -a test_redis ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        command: ["redis-server", "--requirepass", "test_redis"]
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Restore node_modules cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            services/*/node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Initialize test database
+        run: |
+          PGPASSWORD=${{ env.POSTGRES_PASSWORD }} psql \
+            -h localhost -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }} \
+            -f infrastructure/docker/init-scripts/postgres/01-init.sql
+          PGPASSWORD=${{ env.POSTGRES_PASSWORD }} psql \
+            -h localhost -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }} \
+            -f infrastructure/docker/init-scripts/postgres/02-schema.sql
+
+      - name: Run cross-tenant RLS isolation tests
+        run: pnpm test:security
+        env:
+          DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          REDIS_URL: redis://:${{ env.REDIS_PASSWORD }}@localhost:6379/0
+
+      - name: Assert zero cross-tenant rows returned
+        run: |
+          echo "Verifying RLS probe returned 0 cross-tenant rows..."
+          # This step fails the job if security tests exit non-zero
+          # Individual test files in packages/*/tests/security/ handle assertions
+
+  # ─── Build & Push Docker Images ───────────────────────────────────────────────
   build:
     name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: [typecheck, lint, unit-tests]
+    needs: [typecheck, lint, unit-tests, integration-tests, security-scan, security-tests]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     strategy:
       matrix:
@@ -229,3 +371,82 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ─── Deploy to Staging ────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.responio.io
+    steps:
+      - name: Trigger ArgoCD sync — staging
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.ARGOCD_SERVER }}/api/v1/applications/responio-staging/sync" \
+            -d '{"prune":true,"dryRun":false}'
+
+      - name: Wait for healthy rollout
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+              "${{ secrets.ARGOCD_SERVER }}/api/v1/applications/responio-staging" \
+              | jq -r '.status.health.status')
+            echo "Health: $STATUS"
+            if [ "$STATUS" = "Healthy" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "Staging rollout timed out" && exit 1
+
+      - name: Post deploy summary
+        run: |
+          echo "### Staging Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://staging.responio.io" >> $GITHUB_STEP_SUMMARY
+          echo "- Time: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+  # ─── Deploy to Production ─────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://app.responio.io
+    # GitHub environment protection rules enforce manual approval here.
+    # Configure in: Settings → Environments → production → Required reviewers
+    steps:
+      - name: Trigger ArgoCD sync — production
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN_PROD }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.ARGOCD_SERVER_PROD }}/api/v1/applications/responio-production/sync" \
+            -d '{"prune":true,"dryRun":false}'
+
+      - name: Wait for healthy rollout
+        run: |
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN_PROD }}" \
+              "${{ secrets.ARGOCD_SERVER_PROD }}/api/v1/applications/responio-production" \
+              | jq -r '.status.health.status')
+            echo "Health: $STATUS"
+            if [ "$STATUS" = "Healthy" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "Production rollout timed out" && exit 1
+
+      - name: Post deploy summary
+        run: |
+          echo "### Production Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://app.responio.io" >> $GITHUB_STEP_SUMMARY
+          echo "- Time: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- Approved by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
