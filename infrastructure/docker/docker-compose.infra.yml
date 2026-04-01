@@ -244,7 +244,6 @@ services:
 
   # ──────────────────────────────────────────────
   # ClickHouse — Analytics database
-  # (Phase 2 — kept here for full stack bring-up)
   # ──────────────────────────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:24.3-alpine
@@ -266,14 +265,11 @@ services:
       nofile:
         soft: 262144
         hard: 262144
-    profiles:
-      - analytics  # Start with: docker compose --profile analytics up -d
 
   # ──────────────────────────────────────────────
-  # n8n — Headless workflow execution engine
-  # Phase 2 feature. UI is DISABLED — customers use React Flow builder.
-  # n8n runs as an internal service; workflows are created via API only.
-  # ⚠ Requires commercial license before production use.
+  # n8n — Headless workflow execution engine (CORE SERVICE — ADR-001 DECIDED)
+  # UI is DISABLED — customers use our React Flow builder.
+  # n8n runs as an internal service; workflows created via API only.
   # ──────────────────────────────────────────────
   n8n:
     image: n8nio/n8n:latest
@@ -334,5 +330,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    profiles:
-      - workflow  # Start with: docker compose --profile workflow up -d

@@ -4,31 +4,34 @@
  * Single entry point for all external traffic.
  * Responsibilities:
  *   - JWT verification and tenant context extraction
+ *   - Internal auth (email/password → JWT) until Authentik is deployed
  *   - Reverse proxy to downstream microservices
  *   - Inbound webhook handling (WhatsApp, future channels)
- *   - Rate limiting (TODO: add @fastify/rate-limit in Phase 2)
  */
 
 import Fastify from 'fastify';
 import fjwt from '@fastify/jwt';
 import fcors from '@fastify/cors';
 import knex from 'knex';
+import Redis from 'ioredis';
 import { createNatsConnection, initializeStreams, EventPublisher } from '@responio/events';
 import { registerAuthPlugin } from './plugins/auth';
 import { registerProxyRoutes } from './plugins/proxy';
 import { registerWhatsAppWebhook } from './webhooks/whatsapp';
+import { registerAuthRoutes } from './auth/routes';
 
 const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? 'info',
     transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
-    redact: ['req.headers.authorization', 'req.headers["x-hub-signature-256"]'],
+    redact: ['req.headers.authorization', 'req.headers["x-hub-signature-256"]', 'body.password'],
   },
 });
 
 const PORT = Number(process.env.PORT ?? 3000);
 const NATS_URL = process.env.NATS_URL ?? 'nats://localhost:4222';
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://responio:dev_password_change_in_prod@localhost:5432/responio_development';
+const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev_jwt_secret_change_in_prod';
 
 async function start(): Promise<void> {
@@ -43,6 +46,9 @@ async function start(): Promise<void> {
     pool: { min: 2, max: 5 },
   });
 
+  const redis = new Redis(REDIS_URL);
+  redis.on('error', (err) => fastify.log.error({ err }, 'Redis error'));
+
   // ── Fastify plugins ────────────────────────────────────────────────────────
   await fastify.register(fcors, {
     origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
@@ -52,7 +58,10 @@ async function start(): Promise<void> {
 
   await fastify.register(fjwt, { secret: JWT_SECRET });
 
-  // ── Auth middleware ────────────────────────────────────────────────────────
+  // ── Auth routes (bypasses JWT middleware — they issue the tokens) ──────────
+  registerAuthRoutes(fastify, db, redis);
+
+  // ── JWT auth middleware for all other /api/v1/* routes ────────────────────
   registerAuthPlugin(fastify);
 
   // ── Health & metrics ───────────────────────────────────────────────────────
@@ -62,7 +71,7 @@ async function start(): Promise<void> {
     return '# responio-gateway metrics\n';
   });
 
-  // ── Inbound webhooks (before proxy to avoid double-parsing) ───────────────
+  // ── Inbound webhooks ───────────────────────────────────────────────────────
   registerWhatsAppWebhook(fastify, db, publisher);
 
   // ── Reverse proxy to downstream services ──────────────────────────────────
