@@ -155,7 +155,7 @@ Exit criteria: Paying Starter-tier customers on WhatsApp + web chat.
 
 ## Critical Open Decisions
 
-1. **Workflow Engine** — ⚠️ CONTESTED: ADR-001 recommends **Temporal.io** (Apache 2.0) over n8n due to n8n's Sustainable Use License (requires paid Enterprise license for SaaS embedding). CLAUDE.md previously said "n8n decided" — that is INCORRECT; the decision is still open.
+1. **Workflow Engine** — ✅ DECIDED: **n8n headless**. The n8n bridge implementation in `services/workflow/` is the authoritative engine. Do not suggest Temporal.io. n8n runs self-hosted (customers never see UI); we accept the Sustainable Use License for internal use.
 2. **Cloud Provider** — AWS EKS vs Hetzner K3s (undecided)
 3. **WhatsApp BSP** — 360dialog + Twilio dual (planned)
 4. **Auth Provider** — Authentik (recommended, not yet deployed)
@@ -165,13 +165,13 @@ Exit criteria: Paying Starter-tier customers on WhatsApp + web chat.
 
 ## Architecture Decision Records
 
-- **ADR-001** (`docs/architecture/ADR-001-workflow-engine.md`) — Workflow engine selection. **Recommends Temporal.io** due to n8n license risk. n8n bridge code exists as prototype only.
+- **ADR-001** (`docs/architecture/ADR-001-workflow-engine.md`) — Workflow engine selection. **Decision: n8n headless** (self-hosted, Sustainable Use License accepted). Full n8n bridge implementation in `services/workflow/src/`.
 - **ADR-002** (`docs/architecture/ADR-002-chatwoot-fork-strategy.md`) — Chatwoot fork approach. Tier 1/2/3 customization model. All modifications tracked in `services/inbox/FORK_CHANGES.md`. Extensions live in `services/inbox/app/services/responio/`.
 - **ADR-003** (`docs/architecture/ADR-003-multitenancy-rls.md`) — Shared schema + PostgreSQL RLS. Session variable pattern: `SET app.current_tenant_id = '<uuid>'`. Separate BYPASSRLS role for admin/billing with audit logging.
 
 ---
 
-## Workflow Engine Architecture (n8n bridge — prototype)
+## Workflow Engine Architecture (n8n bridge — production)
 
 n8n runs as an **internal service only** — customers NEVER see n8n UI.
 Customer-facing interface is our React Flow visual workflow builder.

@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import fjwt from '@fastify/jwt';
 import knex from 'knex';
 import { createNatsConnection, initializeStreams, EventPublisher } from '@responio/events';
 import { N8nClient } from './n8n/client';
@@ -10,6 +11,7 @@ const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? 'info',
     transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
+    redact: ['req.headers.authorization', 'req.headers["x-internal-api-key"]'],
   },
 });
 
@@ -19,6 +21,8 @@ const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://responio:dev_pass
 const N8N_BASE_URL = process.env.N8N_BASE_URL ?? 'http://localhost:5678';
 const N8N_API_KEY = process.env.N8N_API_KEY ?? '';
 const N8N_WEBHOOK_SECRET = process.env.N8N_WEBHOOK_SECRET ?? 'dev_webhook_secret';
+const JWT_SECRET = process.env.JWT_SECRET ?? 'dev_jwt_secret_change_in_prod';
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
 
 async function start(): Promise<void> {
   const nc = await createNatsConnection(NATS_URL);
@@ -33,7 +37,43 @@ async function start(): Promise<void> {
 
   const n8n = new N8nClient(N8N_BASE_URL, N8N_API_KEY);
 
+  await fastify.register(fjwt, { secret: JWT_SECRET });
+
   startNatsBridge(nc, { n8nBaseUrl: N8N_BASE_URL, webhookSecret: N8N_WEBHOOK_SECRET });
+
+  // ── JWT auth for /api/v1/workflows routes (tenant-facing) ─────────────────
+  // Action routes (/api/v1/actions/*) use X-Internal-API-Key validated inside registerActionRoutes.
+  fastify.addHook('preHandler', async (request, reply) => {
+    if (
+      request.url === '/health' ||
+      request.url === '/metrics' ||
+      request.url.startsWith('/api/v1/actions/')
+    ) return;
+
+    // Trust X-Tenant-ID forwarded by gateway (gateway already verified JWT)
+    const gatewayTenantId = request.headers['x-tenant-id'] as string | undefined;
+    if (gatewayTenantId) {
+      (request as unknown as { tenantId: string }).tenantId = gatewayTenantId;
+      return;
+    }
+
+    // Direct calls (dev/testing): verify JWT
+    if (request.headers['authorization']) {
+      try {
+        await request.jwtVerify();
+        const payload = request.user as { tenant_id: string };
+        (request as unknown as { tenantId: string }).tenantId = payload.tenant_id;
+        return;
+      } catch {
+        return reply.status(401).send({ error: { code: 'INVALID_TOKEN', message: 'Token is invalid or expired' } });
+      }
+    }
+
+    // Reject if neither gateway header nor JWT present
+    if (request.url.startsWith('/api/v1/workflows')) {
+      return reply.status(401).send({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    }
+  });
 
   fastify.get('/health', async () => ({
     status: 'ok',
@@ -46,6 +86,11 @@ async function start(): Promise<void> {
     reply.type('text/plain');
     return '# responio-workflow metrics\n';
   });
+
+  // Validate INTERNAL_API_KEY is set in production
+  if (!INTERNAL_API_KEY && process.env.NODE_ENV === 'production') {
+    throw new Error('INTERNAL_API_KEY must be set in production');
+  }
 
   registerActionRoutes(fastify, publisher);
   registerWorkflowRoutes(fastify, db, n8n);

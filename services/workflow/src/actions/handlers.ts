@@ -249,6 +249,91 @@ export function registerActionRoutes(
     return reply.send({ note_id: noteId });
   });
 
+  // ── POST /api/v1/actions/invoke-ai-agent ──────────────────────────────────
+  const invokeAiAgentSchema = z.object({
+    conversation_id: z.string().uuid(),
+    ai_agent_id: z.string().uuid(),
+    context: z.record(z.unknown()).optional(),
+  });
+
+  app.post('/api/v1/actions/invoke-ai-agent', async (request, reply) => {
+    const tenantId = (request as unknown as { tenantId: string }).tenantId;
+    const body = invokeAiAgentSchema.parse(request.body);
+
+    await publisher.publish(Subjects.AI_AGENT_INVOKED, {
+      tenant_id: tenantId,
+      workspace_id: '',
+      source_service: 'workflow',
+      payload: {
+        ai_agent_id: body.ai_agent_id,
+        conversation_id: body.conversation_id,
+        contact_id: '',  // Resolved by AI service from conversation
+        input_message_id: '',
+      },
+    });
+
+    return reply.send({ invocation_id: crypto.randomUUID(), status: 'queued', ai_agent_id: body.ai_agent_id });
+  });
+
+  // ── POST /api/v1/actions/ai-classify ──────────────────────────────────────
+  const aiClassifySchema = z.object({
+    text: z.string().min(1),
+    categories: z.array(z.string()).min(1),
+    model: z.string().optional(),
+  });
+
+  app.post('/api/v1/actions/ai-classify', async (request, reply) => {
+    const body = aiClassifySchema.parse(request.body);
+    // Delegate to AI service via internal HTTP (AI service implements the actual LLM call)
+    const aiUrl = process.env.AI_SERVICE_URL ?? 'http://ai:3003';
+
+    const res = await fetch(`${aiUrl}/internal/classify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-API-Key': INTERNAL_API_KEY,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return reply.status(502).send({ error: { code: 'AI_SERVICE_ERROR', message: text } });
+    }
+
+    return reply.send(await res.json());
+  });
+
+  // ── POST /api/v1/actions/ai-extract ───────────────────────────────────────
+  const aiExtractSchema = z.object({
+    text: z.string().min(1),
+    schema: z.record(z.string()),  // field_name → description
+    model: z.string().optional(),
+  });
+
+  app.post('/api/v1/actions/ai-extract', async (request, reply) => {
+    const body = aiExtractSchema.parse(request.body);
+    const aiUrl = process.env.AI_SERVICE_URL ?? 'http://ai:3003';
+
+    const res = await fetch(`${aiUrl}/internal/extract`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-API-Key': INTERNAL_API_KEY,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return reply.status(502).send({ error: { code: 'AI_SERVICE_ERROR', message: text } });
+    }
+
+    return reply.send(await res.json());
+  });
+
   // ── POST /api/v1/actions/trigger-webhook (Advanced tier HTTP request) ──────
   const triggerWebhookSchema = z.object({
     url: z.string().url(),
