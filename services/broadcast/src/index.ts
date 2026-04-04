@@ -61,7 +61,7 @@ async function start(): Promise<void> {
   });
 
   registerBroadcastRoutes(fastify, db, publisher);
-  startBroadcastScheduler(db, publisher, fastify.log);
+  startBroadcastScheduler(db, fastify.log);
 
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   fastify.log.info(`Broadcast service listening on :${PORT}`);

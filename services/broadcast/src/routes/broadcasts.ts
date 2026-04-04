@@ -206,17 +206,8 @@ export function registerBroadcastRoutes(
       await db('broadcast_recipients').insert(recipientRows.slice(i, i + CHUNK));
     }
 
-    // Emit event for the sender worker to pick up
-    await publisher.publish(Subjects.BILLING_MAC_INCREMENTED, {
-      tenant_id: tenantId,
-      workspace_id: '',
-      source_service: 'broadcast',
-      payload: {
-        contact_id: '',  // Per-contact tracking handled by sender
-        billing_period: currentBillingPeriod(),
-        current_mac_count: recipientCount,
-      },
-    });
+    // MAC counting happens per-contact when MESSAGE_OUTBOUND is emitted by the sender worker.
+    // Do not publish BILLING_MAC_INCREMENTED here — contact_id would be empty and corrupt HyperLogLog.
 
     return reply.send({
       data: {

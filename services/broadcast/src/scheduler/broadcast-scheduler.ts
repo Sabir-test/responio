@@ -10,23 +10,16 @@
 
 import type { Knex } from 'knex';
 import type { EventPublisher } from '@responio/events';
-import { Subjects } from '@responio/events';
 
 const POLL_INTERVAL_MS = Number(process.env.BROADCAST_POLL_INTERVAL_MS ?? '60000'); // 1 min default
 
-function currentBillingPeriod(): string {
-  const now = new Date();
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
 export function startBroadcastScheduler(
   db: Knex,
-  publisher: EventPublisher,
   log: { info: (...a: unknown[]) => void; error: (...a: unknown[]) => void }
 ): void {
   const tick = async (): Promise<void> => {
     try {
-      await dispatchDueBroadcasts(db, publisher, log);
+      await dispatchDueBroadcasts(db, log);
     } catch (err) {
       log.error({ err }, '[broadcast-scheduler] Tick failed');
     }
@@ -40,7 +33,6 @@ export function startBroadcastScheduler(
 
 async function dispatchDueBroadcasts(
   db: Knex,
-  publisher: EventPublisher,
   log: { info: (...a: unknown[]) => void; error: (...a: unknown[]) => void }
 ): Promise<void> {
   // Use a transaction with FOR UPDATE SKIP LOCKED to atomically claim broadcasts
@@ -63,18 +55,7 @@ async function dispatchDueBroadcasts(
       log.info({ broadcast_id: broadcast.id, tenant_id: broadcast.tenant_id }, '[broadcast-scheduler] Dispatching due broadcast');
     }
 
-    // Publish after the transaction commits so consumers see 'sending' status
-    for (const broadcast of due) {
-      await publisher.publish(Subjects.BILLING_MAC_INCREMENTED, {
-        tenant_id: broadcast.tenant_id,
-        workspace_id: broadcast.workspace_id ?? '',
-        source_service: 'broadcast-scheduler',
-        payload: {
-          contact_id: '',   // Per-contact tracking handled downstream by sender
-          billing_period: currentBillingPeriod(),
-          current_mac_count: broadcast.recipient_count ?? 0,
-        },
-      });
-    }
+    // MAC counting is handled per-contact downstream when the sender emits MESSAGE_OUTBOUND.
+    // Do not publish BILLING_MAC_INCREMENTED here — contact_id would be empty and corrupt HyperLogLog.
   });
 }

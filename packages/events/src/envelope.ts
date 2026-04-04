@@ -193,6 +193,13 @@ export interface WorkflowStepCompletedPayload {
   output: Record<string, unknown>;
 }
 
+export interface WorkflowCompletedPayload {
+  workflow_id: string;
+  execution_id: string;
+  duration_ms: number;
+  steps_executed: number;
+}
+
 export interface WorkflowFailedPayload {
   workflow_id: string;
   execution_id: string;

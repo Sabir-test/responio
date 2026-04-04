@@ -35,31 +35,38 @@ export function startMacListener(
   const sub = new EventSubscriber(nc);
   const publisher = new EventPublisher(nc);
 
+  const stderr = (msg: string, err: unknown) =>
+    process.stderr.write(JSON.stringify({ level: 'error', msg, err: String(err) }) + '\n');
+
   // ── message.inbound → count the contact as active ─────────────────────────
-  sub.subscribe<MessageInboundPayload>(
-    {
-      consumerName: `${SERVICE_NAME}.mac-inbound`,
-      streamName: 'MESSAGE',
-      filterSubject: Subjects.MESSAGE_INBOUND,
-    },
-    async (event, ack) => {
-      await handleMacEvent(db, redis, publisher, event.tenant_id, event.payload.contact_id);
-      ack();
-    }
-  );
+  sub
+    .subscribe<MessageInboundPayload>(
+      {
+        consumerName: `${SERVICE_NAME}.mac-inbound`,
+        streamName: 'MESSAGE',
+        filterSubject: Subjects.MESSAGE_INBOUND,
+      },
+      async (event, ack) => {
+        await handleMacEvent(db, redis, publisher, event.tenant_id, event.payload.contact_id);
+        ack();
+      }
+    )
+    .catch((err) => stderr('Failed to set up message.inbound MAC subscriber', err));
 
   // ── message.outbound → also counts (agent/AI outbound to a contact) ───────
-  sub.subscribe<MessageOutboundPayload>(
-    {
-      consumerName: `${SERVICE_NAME}.mac-outbound`,
-      streamName: 'MESSAGE',
-      filterSubject: Subjects.MESSAGE_OUTBOUND,
-    },
-    async (event, ack) => {
-      await handleMacEvent(db, redis, publisher, event.tenant_id, event.payload.contact_id);
-      ack();
-    }
-  );
+  sub
+    .subscribe<MessageOutboundPayload>(
+      {
+        consumerName: `${SERVICE_NAME}.mac-outbound`,
+        streamName: 'MESSAGE',
+        filterSubject: Subjects.MESSAGE_OUTBOUND,
+      },
+      async (event, ack) => {
+        await handleMacEvent(db, redis, publisher, event.tenant_id, event.payload.contact_id);
+        ack();
+      }
+    )
+    .catch((err) => stderr('Failed to set up message.outbound MAC subscriber', err));
 
   // Subscribed — info logged at service level
 }
