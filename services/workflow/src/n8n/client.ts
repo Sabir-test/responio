@@ -80,14 +80,20 @@ export class N8nClient {
     path: string,
     body?: unknown
   ): Promise<T> {
-    const res = await fetch(`${this.baseUrl}/api/v1${path}`, {
-      method,
-      headers: {
-        'X-N8N-API-KEY': this.apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/api/v1${path}`, {
+        method,
+        headers: {
+          'X-N8N-API-KEY': this.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(15_000), // 15s timeout for all n8n API calls
+      });
+    } catch (err) {
+      throw new Error(`n8n API call failed (${method} ${path}): ${String(err)}`);
+    }
 
     if (!res.ok) {
       const text = await res.text();

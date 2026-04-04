@@ -2,6 +2,9 @@
  * @responio/types — Shared TypeScript types across all services.
  */
 
+// Re-export feature flags
+export { PLAN_FEATURES, type FeatureFlags } from './features';
+
 // Re-export event types
 export type {
   NatsEvent,

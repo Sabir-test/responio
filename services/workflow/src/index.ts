@@ -4,6 +4,7 @@ import knex from 'knex';
 import { createNatsConnection, initializeStreams, EventPublisher } from '@responio/events';
 import { N8nClient } from './n8n/client';
 import { startNatsBridge } from './bridge/nats-bridge';
+import { startExecutionTracker } from './nats/execution-tracker';
 import { registerActionRoutes } from './actions/handlers';
 import { registerWorkflowRoutes } from './routes/workflows';
 
@@ -39,7 +40,14 @@ async function start(): Promise<void> {
 
   await fastify.register(fjwt, { secret: JWT_SECRET });
 
+  // Add request-ID propagation for structured logging
+  fastify.addHook('onRequest', async (request) => {
+    const requestId = (request.headers['x-request-id'] as string) ?? crypto.randomUUID();
+    request.log = request.log.child({ request_id: requestId, tenant_id: (request.headers['x-tenant-id'] as string) ?? undefined });
+  });
+
   startNatsBridge(nc, { n8nBaseUrl: N8N_BASE_URL, webhookSecret: N8N_WEBHOOK_SECRET });
+  startExecutionTracker(nc, db);
 
   // ── JWT auth for /api/v1/workflows routes (tenant-facing) ─────────────────
   // Action routes (/api/v1/actions/*) use X-Internal-API-Key validated inside registerActionRoutes.
@@ -92,7 +100,7 @@ async function start(): Promise<void> {
     throw new Error('INTERNAL_API_KEY must be set in production');
   }
 
-  registerActionRoutes(fastify, publisher);
+  registerActionRoutes(fastify, publisher, db);
   registerWorkflowRoutes(fastify, db, n8n);
 
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
@@ -100,4 +108,4 @@ async function start(): Promise<void> {
 }
 
 process.on('SIGTERM', async () => { await fastify.close(); process.exit(0); });
-start().catch((err) => { console.error('Fatal:', err); process.exit(1); });
+start().catch((err) => { process.stderr.write(JSON.stringify({ level: 'fatal', msg: String(err) }) + '\n'); process.exit(1); });

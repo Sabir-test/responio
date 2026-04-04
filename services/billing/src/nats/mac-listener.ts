@@ -27,14 +27,6 @@ import { PLANS, type PlanId } from '../types/plans';
 
 const SERVICE_NAME = 'billing';
 
-// Track which thresholds have been fired per tenant per period to avoid duplicate alerts.
-// In-memory; good enough for single-instance billing service.
-const firedThresholds = new Map<string, Set<number>>();
-
-function thresholdKey(tenantId: string, period: string, pct: number): string {
-  return `${tenantId}:${period}:${pct}`;
-}
-
 export function startMacListener(
   nc: NatsConnection,
   db: Knex,
@@ -69,7 +61,7 @@ export function startMacListener(
     }
   );
 
-  console.log('[mac-listener] Subscribed to message.inbound and message.outbound for MAC metering');
+  // Subscribed — info logged at service level
 }
 
 async function handleMacEvent(
@@ -94,13 +86,11 @@ async function handleMacEvent(
   const crossedPcts = await checkMacThresholds(redis, tenantId, macLimit, period);
 
   for (const pct of crossedPcts) {
-    const key = thresholdKey(tenantId, period, pct);
-
-    // Use the in-memory set to avoid repeated alerts within the same process lifecycle
-    const tenantSet = firedThresholds.get(tenantId) ?? new Set<number>();
-    if (tenantSet.has(pct)) continue;
-    tenantSet.add(pct);
-    firedThresholds.set(tenantId, tenantSet);
+    // Use Redis SETNX to guarantee exactly-once threshold alert across all billing service instances.
+    // 35-day TTL covers the full billing period plus a 5-day buffer before auto-expiry.
+    const dedupKey = `billing:threshold:fired:${tenantId}:${period}:${pct}`;
+    const acquired = await redis.set(dedupKey, '1', 'NX', 'EX', 35 * 24 * 60 * 60);
+    if (!acquired) continue; // Already fired this threshold this period
 
     const macCount = await import('../services/mac-metering').then((m) =>
       m.getMacCount(redis, tenantId, period)
@@ -120,8 +110,7 @@ async function handleMacEvent(
       payload,
     });
 
-    void key; // suppress unused variable warning — key is conceptually useful
-    console.warn(`[mac-listener] Tenant ${tenantId} hit ${pct}% MAC threshold (${macCount}/${macLimit})`);
+    // Threshold warning logged via NATS event; no additional console output needed
   }
 }
 

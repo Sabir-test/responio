@@ -3,6 +3,7 @@ import fjwt from '@fastify/jwt';
 import knex from 'knex';
 import { createNatsConnection, initializeStreams, EventPublisher } from '@responio/events';
 import { registerBroadcastRoutes } from './routes/broadcasts';
+import { startBroadcastScheduler } from './scheduler/broadcast-scheduler';
 
 const fastify = Fastify({
   logger: {
@@ -60,10 +61,11 @@ async function start(): Promise<void> {
   });
 
   registerBroadcastRoutes(fastify, db, publisher);
+  startBroadcastScheduler(db, publisher, fastify.log);
 
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   fastify.log.info(`Broadcast service listening on :${PORT}`);
 }
 
 process.on('SIGTERM', async () => { await fastify.close(); process.exit(0); });
-start().catch((err) => { console.error('Fatal:', err); process.exit(1); });
+start().catch((err) => { process.stderr.write(JSON.stringify({ level: 'fatal', msg: String(err) }) + '\n'); process.exit(1); });

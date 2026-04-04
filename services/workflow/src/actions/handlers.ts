@@ -14,15 +14,68 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import type { Knex } from 'knex';
 import { z } from 'zod';
 import type { EventPublisher } from '@responio/events';
 import { Subjects } from '@responio/events';
+import { PLAN_FEATURES } from '@responio/types';
 
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
 
+// ─── Context resolution helpers ───────────────────────────────────────────────
+
+interface ConversationContext {
+  workspace_id: string;
+  contact_id: string;
+  inbox_id: string;
+}
+
+/**
+ * Resolves workspace_id, contact_id, and inbox_id from a conversation.
+ * Returns null if the conversation does not exist for this tenant.
+ */
+async function resolveConversationContext(
+  db: Knex,
+  tenantId: string,
+  conversationId: string
+): Promise<ConversationContext | null> {
+  const row = await db('conversations')
+    .where({ id: conversationId, tenant_id: tenantId })
+    .select('workspace_id', 'contact_id', 'inbox_id')
+    .first();
+  return row ?? null;
+}
+
+/**
+ * Returns the default workspace_id for a tenant.
+ * Used for contact-only operations that have no conversation context.
+ */
+async function resolveDefaultWorkspace(db: Knex, tenantId: string): Promise<string> {
+  const ws = await db('workspaces')
+    .where({ tenant_id: tenantId, is_default: true })
+    .select('id')
+    .first();
+  return ws?.id ?? '';
+}
+
+// ─── Feature gate helper ──────────────────────────────────────────────────────
+
+async function checkFeatureGate(
+  db: Knex,
+  tenantId: string,
+  feature: keyof typeof PLAN_FEATURES['starter']
+): Promise<boolean> {
+  const account = await db('accounts').where({ id: tenantId }).select('plan_tier').first();
+  const flags = PLAN_FEATURES[account?.plan_tier ?? 'starter'];
+  return flags?.[feature] ?? false;
+}
+
+// ─── Route registration ───────────────────────────────────────────────────────
+
 export function registerActionRoutes(
   app: FastifyInstance,
-  publisher: EventPublisher
+  publisher: EventPublisher,
+  db: Knex
 ): void {
   // Auth middleware for all action routes
   app.addHook('preHandler', async (request, reply) => {
@@ -54,18 +107,21 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = sendMessageSchema.parse(request.body);
 
-    // TODO: delegate to inbox service via internal HTTP or NATS request
-    // For now: emit outbound message event and return placeholder
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
     const messageId = crypto.randomUUID();
 
     await publisher.publish(Subjects.MESSAGE_OUTBOUND, {
       tenant_id: tenantId,
-      workspace_id: '',  // TODO: resolve from conversation
+      workspace_id: ctx.workspace_id,
       source_service: 'workflow',
       payload: {
         message_id: messageId,
         conversation_id: body.conversation_id,
-        contact_id: '',  // TODO: resolve from conversation
+        contact_id: ctx.contact_id,
         channel_type: 'whatsapp',
         content: body.content,
         content_type: body.content_type,
@@ -94,12 +150,14 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = updateContactSchema.parse(request.body);
 
+    const workspaceId = await resolveDefaultWorkspace(db, tenantId);
+
     // Emit per-field update events
     for (const [fieldName, value] of Object.entries(body.fields)) {
       if (value === undefined) continue;
       await publisher.publish(Subjects.CONTACT_UPDATED, {
         tenant_id: tenantId,
-        workspace_id: '',
+        workspace_id: workspaceId,
         source_service: 'workflow',
         payload: {
           contact_id: body.contact_id,
@@ -125,11 +183,29 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = assignConversationSchema.parse(request.body);
 
-    const assigneeId = body.target_id ?? null; // TODO: implement round_robin/least_busy logic
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
+    // For round_robin/least_busy: select the agent with the fewest open conversations
+    let assigneeId = body.target_id ?? null;
+    if (!assigneeId && (body.assignment_type === 'round_robin' || body.assignment_type === 'least_busy')) {
+      const agent = await db('users')
+        .where({ tenant_id: tenantId, role: 'agent', status: 'active' })
+        .leftJoin('conversations as c', function () {
+          this.on('c.assignee_id', '=', 'users.id').andOnVal('c.status', '=', 'open');
+        })
+        .groupBy('users.id')
+        .orderByRaw('COUNT(c.id) ASC')
+        .select('users.id')
+        .first();
+      assigneeId = agent?.id ?? null;
+    }
 
     await publisher.publish(Subjects.CONVERSATION_ASSIGNED, {
       tenant_id: tenantId,
-      workspace_id: '',
+      workspace_id: ctx.workspace_id,
       source_service: 'workflow',
       payload: {
         conversation_id: body.conversation_id,
@@ -153,10 +229,12 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = addTagSchema.parse(request.body);
 
+    const workspaceId = await resolveDefaultWorkspace(db, tenantId);
+
     if (body.entity_type === 'contact') {
       await publisher.publish(Subjects.CONTACT_UPDATED, {
         tenant_id: tenantId,
-        workspace_id: '',
+        workspace_id: workspaceId,
         source_service: 'workflow',
         payload: {
           contact_id: body.entity_id,
@@ -182,20 +260,29 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = changeLifecycleSchema.parse(request.body);
 
+    // Fetch the contact's current stage before changing it
+    const contact = await db('contacts')
+      .where({ id: body.contact_id, tenant_id: tenantId })
+      .select('lifecycle_stage')
+      .first();
+    const oldStage = contact?.lifecycle_stage ?? 'unknown';
+
+    const workspaceId = await resolveDefaultWorkspace(db, tenantId);
+
     await publisher.publish(Subjects.CONTACT_LIFECYCLE_CHANGED, {
       tenant_id: tenantId,
-      workspace_id: '',
+      workspace_id: workspaceId,
       source_service: 'workflow',
       payload: {
         contact_id: body.contact_id,
-        old_stage: 'unknown',  // TODO: fetch from DB
+        old_stage: oldStage,
         new_stage: body.new_stage,
-        workspace_id: '',
+        workspace_id: workspaceId,
         changed_by: 'workflow',
       },
     });
 
-    return reply.send({ contact_id: body.contact_id, old_stage: 'unknown', new_stage: body.new_stage });
+    return reply.send({ contact_id: body.contact_id, old_stage: oldStage, new_stage: body.new_stage });
   });
 
   // ── POST /api/v1/actions/close-conversation ───────────────────────────────
@@ -208,15 +295,20 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = closeConversationSchema.parse(request.body);
 
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
     await publisher.publish(Subjects.CONVERSATION_RESOLVED, {
       tenant_id: tenantId,
-      workspace_id: '',
+      workspace_id: ctx.workspace_id,
       source_service: 'workflow',
       payload: {
         conversation_id: body.conversation_id,
         resolved_by: 'workflow',
         resolution_time_seconds: 0,
-        contact_id: '',
+        contact_id: ctx.contact_id,
       },
     });
 
@@ -260,14 +352,19 @@ export function registerActionRoutes(
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = invokeAiAgentSchema.parse(request.body);
 
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
     await publisher.publish(Subjects.AI_AGENT_INVOKED, {
       tenant_id: tenantId,
-      workspace_id: '',
+      workspace_id: ctx.workspace_id,
       source_service: 'workflow',
       payload: {
         ai_agent_id: body.ai_agent_id,
         conversation_id: body.conversation_id,
-        contact_id: '',  // Resolved by AI service from conversation
+        contact_id: ctx.contact_id,
         input_message_id: '',
       },
     });
@@ -284,7 +381,6 @@ export function registerActionRoutes(
 
   app.post('/api/v1/actions/ai-classify', async (request, reply) => {
     const body = aiClassifySchema.parse(request.body);
-    // Delegate to AI service via internal HTTP (AI service implements the actual LLM call)
     const aiUrl = process.env.AI_SERVICE_URL ?? 'http://ai:3003';
 
     const res = await fetch(`${aiUrl}/internal/classify`, {
@@ -308,7 +404,7 @@ export function registerActionRoutes(
   // ── POST /api/v1/actions/ai-extract ───────────────────────────────────────
   const aiExtractSchema = z.object({
     text: z.string().min(1),
-    schema: z.record(z.string()),  // field_name → description
+    schema: z.record(z.string()),
     model: z.string().optional(),
   });
 
@@ -344,7 +440,15 @@ export function registerActionRoutes(
   });
 
   app.post('/api/v1/actions/trigger-webhook', async (request, reply) => {
-    // TODO: gate to Advanced tier
+    const tenantId = (request as unknown as { tenantId: string }).tenantId;
+
+    // Gate to Advanced tier and above
+    if (!(await checkFeatureGate(db, tenantId, 'http_in_workflows'))) {
+      return reply.status(403).send({
+        error: { code: 'FEATURE_NOT_AVAILABLE', message: 'HTTP request actions require the Advanced plan' },
+      });
+    }
+
     const body = triggerWebhookSchema.parse(request.body);
 
     const res = await fetch(body.url, {

@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { z } from 'zod';
 import type { N8nWorkflow, N8nNode, N8nConnections } from './client';
 
 // ─── Our Workflow DSL types ───────────────────────────────────────────────────
@@ -102,6 +103,98 @@ interface DslAiStepData {
   categories?: string[];  // for ai_classify
   schema?: Record<string, string>;  // for ai_extract
   model?: string;
+}
+
+// ─── Zod validation schemas ───────────────────────────────────────────────────
+
+export const DslTriggerDataSchema = z.object({
+  trigger_type: z.enum([
+    'conversation_created', 'message_inbound', 'keyword_match',
+    'contact_field_updated', 'lifecycle_changed', 'conversation_assigned',
+    'conversation_resolved', 'broadcast_reply', 'ai_handoff',
+    'scheduled', 'external_webhook',
+  ]),
+  keywords: z.array(z.string()).optional(),
+  cron: z.string().optional(),
+  field_name: z.string().optional(),
+  from_stage: z.string().optional(),
+  to_stage: z.string().optional(),
+});
+
+export const DslActionDataSchema = z.object({
+  action_type: z.enum([
+    'send_message', 'update_contact', 'assign_conversation', 'add_tag',
+    'change_lifecycle', 'close_conversation', 'snooze_conversation',
+    'invoke_ai_agent', 'ai_classify', 'ai_extract', 'create_note',
+    'http_request', 'wait_delay',
+  ]),
+  params: z.record(z.unknown()),
+  retry_count: z.number().int().min(0).max(10).optional(),
+  timeout_ms: z.number().min(1000).max(60000).optional(),
+});
+
+export const DslConditionDataSchema = z.object({
+  condition_type: z.enum(['if_else', 'switch', 'time_gate', 'ab_split']),
+  expression: z.string().optional(),
+  cases: z.record(z.number()).optional(),
+  business_hours: z.object({
+    start: z.string(),
+    end: z.string(),
+    timezone: z.string(),
+    days: z.array(z.number().int().min(0).max(6)),
+  }).optional(),
+  split_pct: z.number().min(0).max(100).optional(),
+});
+
+export const DslAiStepDataSchema = z.object({
+  action_type: z.enum(['ai_respond', 'ai_classify', 'ai_extract']),
+  ai_agent_id: z.string().uuid().optional(),
+  categories: z.array(z.string()).optional(),
+  schema: z.record(z.string()).optional(),
+  model: z.string().optional(),
+});
+
+export const DslNodeSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(['trigger', 'action', 'condition', 'ai_step']),
+  position: z.object({ x: z.number(), y: z.number() }),
+  data: z.union([DslTriggerDataSchema, DslActionDataSchema, DslConditionDataSchema, DslAiStepDataSchema]),
+});
+
+export const DslEdgeSchema = z.object({
+  id: z.string().min(1),
+  source: z.string().min(1),
+  target: z.string().min(1),
+  sourceHandle: z.string().optional(),
+  label: z.string().optional(),
+});
+
+export const DslWorkflowGraphSchema = z.object({
+  nodes: z.array(DslNodeSchema).min(1),
+  edges: z.array(DslEdgeSchema),
+});
+
+/**
+ * Validate graph connectivity and trigger count after schema validation.
+ * Returns an error message string, or null if the graph is valid.
+ */
+export function validateGraphConnectivity(graph: DslWorkflowGraph): string | null {
+  const nodeIds = new Set(graph.nodes.map((n) => n.id));
+
+  for (const edge of graph.edges) {
+    if (!nodeIds.has(edge.source)) {
+      return `Edge source '${edge.source}' references a node that does not exist`;
+    }
+    if (!nodeIds.has(edge.target)) {
+      return `Edge target '${edge.target}' references a node that does not exist`;
+    }
+  }
+
+  const triggerCount = graph.nodes.filter((n) => n.type === 'trigger').length;
+  if (triggerCount === 0) return 'Workflow must have exactly one trigger node';
+  if (triggerCount > 1) return 'Workflow cannot have more than one trigger node';
+
+  return null;
 }
 
 // ─── Translation constants ────────────────────────────────────────────────────

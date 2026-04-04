@@ -10,9 +10,11 @@
  * See: build checklist task #21, CLAUDE.md n8n Integration Architecture
  */
 
+import { randomUUID } from 'crypto';
 import type { NatsConnection } from 'nats';
 import {
   EventSubscriber,
+  EventPublisher,
   Subjects,
   type NatsEvent,
   type MessageInboundPayload,
@@ -34,6 +36,7 @@ const SERVICE_NAME = 'workflow-bridge';
 
 export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void {
   const sub = new EventSubscriber(nc);
+  const publisher = new EventPublisher(nc);
 
   // ── conversation.created → New Conversation trigger ───────────────────────
   sub.subscribe<ConversationCreatedPayload>(
@@ -43,7 +46,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.CONVERSATION_CREATED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'conversation-created', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'conversation_created', 'conversation-created', {
         conversation_id: event.payload.conversation_id,
         contact_id: event.payload.contact_id,
         channel_type: event.payload.channel_type,
@@ -74,7 +77,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       };
 
       // Fire general inbound message trigger
-      await fireWebhook(config, event.tenant_id, 'message-inbound', payload);
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'message_inbound', 'message-inbound', payload);
 
       ack();
     }
@@ -88,7 +91,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.CONTACT_UPDATED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'contact-updated', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'contact_field_updated', 'contact-updated', {
         contact_id: event.payload.contact_id,
         field_name: event.payload.field_name,
         old_value: event.payload.old_value,
@@ -108,7 +111,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.CONTACT_LIFECYCLE_CHANGED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'lifecycle-changed', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'lifecycle_changed', 'lifecycle-changed', {
         contact_id: event.payload.contact_id,
         old_stage: event.payload.old_stage,
         new_stage: event.payload.new_stage,
@@ -127,7 +130,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.CONVERSATION_ASSIGNED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'conversation-assigned', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'conversation_assigned', 'conversation-assigned', {
         conversation_id: event.payload.conversation_id,
         assignee_id: event.payload.assignee_id,
         previous_assignee_id: event.payload.previous_assignee_id,
@@ -146,7 +149,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.CONVERSATION_RESOLVED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'conversation-resolved', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'conversation_resolved', 'conversation-resolved', {
         conversation_id: event.payload.conversation_id,
         resolved_by: event.payload.resolved_by,
         resolution_time_seconds: event.payload.resolution_time_seconds,
@@ -165,7 +168,7 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
       filterSubject: Subjects.AI_HANDOFF_TRIGGERED,
     },
     async (event, ack) => {
-      await fireWebhook(config, event.tenant_id, 'ai-handoff', {
+      await fireWebhook(config, publisher, event.tenant_id, event.workspace_id, 'ai_handoff', 'ai-handoff', {
         conversation_id: event.payload.conversation_id,
         ai_agent_id: event.payload.ai_agent_id,
         confidence_score: event.payload.confidence_score,
@@ -178,22 +181,27 @@ export function startNatsBridge(nc: NatsConnection, config: BridgeConfig): void 
     }
   );
 
-  console.log(`[nats-bridge] Subscribed to ${7} NATS event streams → n8n webhooks`);
+  // Bridge subscriptions started — 7 NATS streams → n8n webhooks
 }
 
 /**
- * Fire an n8n webhook for a specific tenant + trigger.
+ * Fire an n8n webhook for a specific tenant + trigger, then emit a
+ * WORKFLOW_TRIGGERED event so the execution tracker can persist the run.
+ *
  * n8n webhook path: /webhook/{tenantId}/{triggerPath}
- * Errors are logged but NOT re-thrown — we ack the NATS message regardless
- * to avoid blocking the event bus. Failed webhooks = no workflow execution.
+ * Errors are logged but NOT re-thrown — we ack the NATS message regardless.
  */
 async function fireWebhook(
   config: BridgeConfig,
+  publisher: EventPublisher,
   tenantId: string,
+  workspaceId: string,
+  triggerType: string,
   triggerPath: string,
   payload: Record<string, unknown>
 ): Promise<void> {
   const url = `${config.n8nBaseUrl}/webhook/${tenantId}/${triggerPath}`;
+  const executionId = randomUUID();
 
   try {
     const res = await fetch(url, {
@@ -202,16 +210,30 @@ async function fireWebhook(
         'Content-Type': 'application/json',
         'X-Responio-Secret': config.webhookSecret,
       },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10_000), // 10s timeout
+      body: JSON.stringify({ ...payload, _execution_id: executionId }),
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!res.ok && res.status !== 404) {
-      // 404 = no active workflow registered for this trigger — that's fine
-      console.warn(`[nats-bridge] n8n webhook ${url} returned ${res.status}`);
+      process.stderr.write(JSON.stringify({ level: 'warn', msg: 'n8n webhook non-OK', url, status: res.status }) + '\n');
+      return;
     }
+
+    if (res.status === 404) return; // No active workflow for this trigger — skip
+
+    // Emit WORKFLOW_TRIGGERED so execution-tracker persists the execution row
+    await publisher.publish(Subjects.WORKFLOW_TRIGGERED, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      source_service: SERVICE_NAME,
+      payload: {
+        execution_id: executionId,
+        workflow_id: '',  // Resolved later by execution tracker from DB lookup
+        trigger_type: triggerType,
+        trigger_event: payload,
+      },
+    });
   } catch (err) {
-    // Network error, timeout, etc. — log and continue
-    console.error(`[nats-bridge] Failed to fire webhook ${url}:`, err);
+    process.stderr.write(JSON.stringify({ level: 'error', msg: 'Failed to fire n8n webhook', url, err: String(err) }) + '\n');
   }
 }

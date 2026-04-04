@@ -54,7 +54,8 @@ export class EventSubscriber {
             () => msg.nak()
           );
         } catch (err) {
-          console.error(`Error processing event on ${opts.filterSubject}:`, err);
+          // NAK so NATS retries delivery up to max_deliver times
+          process.stderr.write(JSON.stringify({ level: 'error', subject: opts.filterSubject, err: String(err) }) + '\n');
           msg.nak();
         }
       }

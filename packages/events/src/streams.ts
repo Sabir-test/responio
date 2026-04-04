@@ -3,7 +3,12 @@ import { connect, NatsConnection, JetStreamManager, StreamConfig, RetentionPolic
 /**
  * NATS JetStream stream definitions.
  * These must be created before any services publish/consume events.
+ *
+ * NATS_REPLICAS: set to 1 for local dev, 3 for production NATS cluster.
+ * Example: NATS_REPLICAS=3 for a 3-node JetStream cluster.
  */
+const NATS_REPLICAS = Math.max(1, Number(process.env.NATS_REPLICAS ?? '1'));
+
 export const STREAM_CONFIGS: StreamConfig[] = [
   {
     name: 'CONVERSATION',
@@ -13,7 +18,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 7 * 24 * 60 * 60 * 1e9, // 7 days in nanoseconds
     max_msgs: 10_000_000,
     max_bytes: 2 * 1024 * 1024 * 1024, // 2 GB
-    replicas: 1, // Increase to 3 in production
+    replicas: NATS_REPLICAS,
     description: 'Conversation lifecycle events',
   },
   {
@@ -24,7 +29,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 7 * 24 * 60 * 60 * 1e9,
     max_msgs: 50_000_000,
     max_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
-    replicas: 1,
+    replicas: NATS_REPLICAS,
     description: 'Message inbound/outbound/delivery events',
   },
   {
@@ -35,7 +40,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 14 * 24 * 60 * 60 * 1e9,
     max_msgs: 10_000_000,
     max_bytes: 2 * 1024 * 1024 * 1024,
-    replicas: 1,
+    replicas: NATS_REPLICAS,
     description: 'Contact CRUD and lifecycle events',
   },
   {
@@ -46,7 +51,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 3 * 24 * 60 * 60 * 1e9,
     max_msgs: 5_000_000,
     max_bytes: 1 * 1024 * 1024 * 1024,
-    replicas: 1,
+    replicas: NATS_REPLICAS,
     description: 'Workflow execution lifecycle events',
   },
   {
@@ -57,7 +62,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 7 * 24 * 60 * 60 * 1e9,
     max_msgs: 20_000_000,
     max_bytes: 5 * 1024 * 1024 * 1024,
-    replicas: 1,
+    replicas: NATS_REPLICAS,
     description: 'AI agent invocation and handoff events',
   },
   {
@@ -68,7 +73,7 @@ export const STREAM_CONFIGS: StreamConfig[] = [
     max_age: 90 * 24 * 60 * 60 * 1e9, // 90 days — billing data kept longer
     max_msgs: 50_000_000,
     max_bytes: 5 * 1024 * 1024 * 1024,
-    replicas: 1,
+    replicas: NATS_REPLICAS,
     description: 'MAC metering, threshold warnings, overage events',
   },
 ];
@@ -126,10 +131,9 @@ export async function initializeStreams(nc: NatsConnection): Promise<void> {
   for (const config of STREAM_CONFIGS) {
     try {
       await jsm.streams.info(config.name);
-      console.log(`Stream ${config.name} already exists — skipping`);
+      // Stream already exists — skip silently
     } catch {
       await jsm.streams.add(config);
-      console.log(`Stream ${config.name} created`);
     }
   }
 }
@@ -148,6 +152,5 @@ export async function createNatsConnection(natsUrl: string): Promise<NatsConnect
     name: process.env.SERVICE_NAME ?? 'responio-service',
   });
 
-  console.log(`Connected to NATS: ${nc.getServer()}`);
   return nc;
 }

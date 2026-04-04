@@ -13,7 +13,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { Knex } from 'knex';
 import type { Redis } from 'ioredis';
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { randomBytes, timingSafeEqual, createHmac } from 'crypto';
+import { verify as argon2Verify, hash as argon2Hash, Algorithm } from '@node-rs/argon2';
 import { z } from 'zod';
 
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '7d';
@@ -49,10 +50,10 @@ export function registerAuthRoutes(
       )
       .first();
 
-    const dummyHash = '$argon2id$v=19$m=65536,t=3,p=4$placeholder'; // prevent timing leak
+    const dummyHash = '$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQ$placeholder00000000000000000000000000000'; // prevent timing leak
     const hashToCheck = user?.password_hash ?? dummyHash;
 
-    const passwordValid = user ? verifyPassword(body.password, hashToCheck) : false;
+    const passwordValid = await verifyPassword(body.password, hashToCheck);
 
     if (!user || !passwordValid) {
       return reply.status(401).send({ error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
@@ -115,7 +116,14 @@ export function registerAuthRoutes(
       return reply.status(401).send({ error: { code: 'INVALID_REFRESH_TOKEN', message: 'Refresh token is invalid or expired' } });
     }
 
-    const { user_id, tenant_id } = JSON.parse(stored) as { user_id: string; tenant_id: string };
+    let parsed: { user_id: string; tenant_id: string };
+    try {
+      parsed = JSON.parse(stored) as { user_id: string; tenant_id: string };
+    } catch {
+      await redis.del(`auth:refresh:${body.refresh_token}`);
+      return reply.status(401).send({ error: { code: 'INVALID_REFRESH_TOKEN', message: 'Refresh token data is corrupted' } });
+    }
+    const { user_id, tenant_id } = parsed;
 
     const user = await db('users').where({ id: user_id, status: 'active' }).first();
     if (!user) {
@@ -156,29 +164,42 @@ export function registerAuthRoutes(
 }
 
 /**
- * Simple HMAC-SHA256 password verification.
- * Format stored: `hmac-sha256:<salt>:<hash>`
- * For production, replace with bcrypt or argon2.
+ * Verify a password against a stored hash.
+ * Supports Argon2id (primary) and legacy HMAC-SHA256 (migration period only).
  */
-function verifyPassword(password: string, storedHash: string): boolean {
-  if (!storedHash.startsWith('hmac-sha256:')) return false;
-  const parts = storedHash.split(':');
-  if (parts.length !== 3) return false;
-  const [, salt, expectedHex] = parts;
-  const actualHex = createHmac('sha256', salt).update(password).digest('hex');
-  try {
-    return timingSafeEqual(Buffer.from(actualHex, 'hex'), Buffer.from(expectedHex, 'hex'));
-  } catch {
-    return false;
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  // Primary path: Argon2id
+  if (storedHash.startsWith('$argon2id$')) {
+    try {
+      return await argon2Verify(storedHash, password);
+    } catch {
+      return false;
+    }
   }
+  // Legacy path: HMAC-SHA256 — kept for accounts created before argon2 migration
+  if (storedHash.startsWith('hmac-sha256:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const [, salt, expectedHex] = parts;
+    const actualHex = createHmac('sha256', salt).update(password).digest('hex');
+    try {
+      return timingSafeEqual(Buffer.from(actualHex, 'hex'), Buffer.from(expectedHex, 'hex'));
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
- * Hash a password for storage.
- * Called during user creation/password reset.
+ * Hash a password for storage using Argon2id.
+ * Called during user creation and password reset.
  */
-export function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString('hex');
-  const hash = createHmac('sha256', salt).update(password).digest('hex');
-  return `hmac-sha256:${salt}:${hash}`;
+export async function hashPassword(password: string): Promise<string> {
+  return argon2Hash(password, {
+    algorithm: Algorithm.Argon2id,
+    memoryCost: 65536,  // 64 MiB
+    timeCost: 3,
+    parallelism: 4,
+  });
 }
