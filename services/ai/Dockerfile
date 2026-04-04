@@ -1,0 +1,40 @@
+FROM node:24-alpine AS base
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable
+
+FROM base AS builder
+WORKDIR /app
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
+COPY packages/events/package.json ./packages/events/
+COPY packages/types/package.json ./packages/types/
+COPY services/ai/package.json ./services/ai/
+
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+
+COPY packages/events/ ./packages/events/
+COPY packages/types/ ./packages/types/
+COPY services/ai/ ./services/ai/
+
+RUN pnpm --filter @responio/events build
+RUN pnpm --filter @responio/types build
+RUN pnpm --filter @responio/ai build
+
+FROM base AS production
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/events/dist ./packages/events/dist
+COPY --from=builder /app/packages/types/dist ./packages/types/dist
+COPY --from=builder /app/services/ai/dist ./services/ai/dist
+COPY --from=builder /app/services/ai/package.json ./services/ai/
+
+USER node
+WORKDIR /app/services/ai
+EXPOSE 3003
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD wget -q --spider http://localhost:3003/health || exit 1
+
+CMD ["node", "dist/index.js"]
