@@ -42,12 +42,13 @@ jobs:
       - name: Build shared packages
         run: pnpm --filter "./packages/**" build
 
-      - name: Cache node_modules
+      - name: Cache node_modules and built packages
         uses: actions/cache/save@v4
         with:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -75,6 +76,7 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -105,6 +107,7 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -135,12 +138,13 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Run unit tests with coverage
-        run: pnpm test --filter "./services/**" --filter "./packages/**"
+        run: pnpm turbo run test --filter="./services/**" --filter="./packages/**"
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
@@ -211,6 +215,7 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -304,6 +309,7 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
+            packages/*/dist
             services/*/node_modules
             apps/*/node_modules
           key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
