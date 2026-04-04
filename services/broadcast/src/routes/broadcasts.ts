@@ -17,7 +17,18 @@ import type { FastifyInstance } from 'fastify';
 import type { Knex } from 'knex';
 import type { EventPublisher } from '@responio/events';
 import { Subjects } from '@responio/events';
+import { PLAN_FEATURES } from '@responio/types';
 import { z } from 'zod';
+
+async function checkFeatureGate(
+  db: Knex,
+  tenantId: string,
+  feature: keyof typeof PLAN_FEATURES['starter']
+): Promise<boolean> {
+  const account = await db('accounts').where({ id: tenantId }).select('plan_tier').first();
+  const flags = PLAN_FEATURES[account?.plan_tier ?? 'starter'];
+  return flags?.[feature] ?? false;
+}
 
 const broadcastSchema = z.object({
   name: z.string().min(1).max(255),
@@ -72,6 +83,9 @@ export function registerBroadcastRoutes(
   // ── POST /api/v1/broadcasts ───────────────────────────────────────────────
   app.post('/api/v1/broadcasts', async (request, reply) => {
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
+    if (!(await checkFeatureGate(db, tenantId, 'broadcasts'))) {
+      return reply.status(403).send({ error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Broadcasts require the Growth plan or above' } });
+    }
     const body = broadcastSchema.parse(request.body);
 
     const id = crypto.randomUUID();
@@ -104,6 +118,9 @@ export function registerBroadcastRoutes(
   app.patch('/api/v1/broadcasts/:id', async (request, reply) => {
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const { id } = request.params as { id: string };
+    if (!(await checkFeatureGate(db, tenantId, 'broadcasts'))) {
+      return reply.status(403).send({ error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Broadcasts require the Growth plan or above' } });
+    }
     const body = broadcastSchema.partial().parse(request.body);
 
     const existing = await db('broadcasts').where({ id, tenant_id: tenantId }).first();
@@ -128,6 +145,9 @@ export function registerBroadcastRoutes(
   app.post('/api/v1/broadcasts/:id/send', async (request, reply) => {
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const { id } = request.params as { id: string };
+    if (!(await checkFeatureGate(db, tenantId, 'broadcasts'))) {
+      return reply.status(403).send({ error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Broadcasts require the Growth plan or above' } });
+    }
 
     const broadcast = await db('broadcasts').where({ id, tenant_id: tenantId }).first();
     if (!broadcast) return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Broadcast not found' } });
@@ -137,11 +157,12 @@ export function registerBroadcastRoutes(
     }
 
     // Resolve recipient contacts from audience filter
-    const filter = JSON.parse(broadcast.audience_filter ?? '{}') as {
-      lifecycle_stages?: string[];
-      tags?: string[];
-      contact_ids?: string[];
-    };
+    let filter: { lifecycle_stages?: string[]; tags?: string[]; contact_ids?: string[] };
+    try {
+      filter = JSON.parse(broadcast.audience_filter ?? '{}') as typeof filter;
+    } catch {
+      filter = {};
+    }
 
     let query = db('contacts').where({ tenant_id: tenantId, do_not_contact: false });
 

@@ -11,10 +11,26 @@
 import type { FastifyInstance } from 'fastify';
 import type { Knex } from 'knex';
 import { z } from 'zod';
-import { translateWorkflow, type DslWorkflowGraph } from '../n8n/translator';
+import {
+  translateWorkflow,
+  validateGraphConnectivity,
+  DslWorkflowGraphSchema,
+  type DslWorkflowGraph,
+} from '../n8n/translator';
 import { N8nClient } from '../n8n/client';
+import { PLAN_FEATURES } from '@responio/types';
 
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? '';
+
+async function checkFeatureGate(
+  db: Knex,
+  tenantId: string,
+  feature: keyof typeof PLAN_FEATURES['starter']
+): Promise<boolean> {
+  const account = await db('accounts').where({ id: tenantId }).select('plan_tier').first();
+  const flags = PLAN_FEATURES[account?.plan_tier ?? 'starter'];
+  return flags?.[feature] ?? false;
+}
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Knex, n8n: N8nClient): void {
   // ── GET /api/v1/workflows ──────────────────────────────────────────────────
@@ -44,14 +60,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Knex, n8n: N8nC
   const createSchema = z.object({
     name: z.string().min(1).max(255),
     trigger_type: z.string().min(1),
-    graph_json: z.object({
-      nodes: z.array(z.unknown()),
-      edges: z.array(z.unknown()),
-    }),
+    graph_json: DslWorkflowGraphSchema,
   });
 
   app.post('/api/v1/workflows', async (request, reply) => {
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
+    if (!(await checkFeatureGate(db, tenantId, 'workflows'))) {
+      return reply.status(403).send({ error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Workflows require the Growth plan or above' } });
+    }
     const body = createSchema.parse(request.body);
 
     const id = crypto.randomUUID();
@@ -73,10 +89,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Knex, n8n: N8nC
   // ── PATCH /api/v1/workflows/:id ───────────────────────────────────────────
   const updateSchema = z.object({
     name: z.string().min(1).max(255).optional(),
-    graph_json: z.object({
-      nodes: z.array(z.unknown()),
-      edges: z.array(z.unknown()),
-    }).optional(),
+    graph_json: DslWorkflowGraphSchema.optional(),
   });
 
   app.patch('/api/v1/workflows/:id', async (request, reply) => {
@@ -105,11 +118,28 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Knex, n8n: N8nC
   app.post('/api/v1/workflows/:id/publish', async (request, reply) => {
     const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const { id } = request.params as { id: string };
+    if (!(await checkFeatureGate(db, tenantId, 'workflows'))) {
+      return reply.status(403).send({ error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Workflows require the Growth plan or above' } });
+    }
 
     const workflow = await db('workflows').where({ id, tenant_id: tenantId }).first();
     if (!workflow) return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } });
 
-    const dsl = JSON.parse(workflow.graph_json) as DslWorkflowGraph;
+    let dsl: DslWorkflowGraph;
+    try {
+      dsl = JSON.parse(workflow.graph_json) as DslWorkflowGraph;
+    } catch {
+      return reply.status(422).send({
+        error: { code: 'INVALID_GRAPH_JSON', message: 'Workflow graph_json is corrupted or not valid JSON' },
+      });
+    }
+
+    const connectivityError = validateGraphConnectivity(dsl);
+    if (connectivityError) {
+      return reply.status(422).send({
+        error: { code: 'INVALID_GRAPH_SCHEMA', message: connectivityError },
+      });
+    }
 
     const n8nWorkflow = translateWorkflow(dsl, {
       tenantId,

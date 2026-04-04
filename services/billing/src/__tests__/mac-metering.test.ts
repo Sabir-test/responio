@@ -15,7 +15,7 @@ import type { Knex } from 'knex';
 
 // ── Mock Redis ────────────────────────────────────────────────────────────────
 
-function makeMockRedis(pfcountValue = 0): jest.Mocked<Redis> {
+function makeMockRedis(pfcountValue = 0): vi.Mocked<Redis> {
   const store = new Map<string, Set<string>>();
   const expiries = new Map<string, number>();
 
@@ -30,11 +30,12 @@ function makeMockRedis(pfcountValue = 0): jest.Mocked<Redis> {
       return store.get(key)?.size ?? 0;
     }),
     expire: vi.fn(async () => 1),
+    set: vi.fn(async () => 'OK'),
     keys: vi.fn(async (pattern: string) => {
       const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
       return [...store.keys()].filter((k) => regex.test(k));
     }),
-  } as unknown as jest.Mocked<Redis>;
+  } as unknown as vi.Mocked<Redis>;
 }
 
 // ── Mock Knex ─────────────────────────────────────────────────────────────────
