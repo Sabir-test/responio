@@ -87,6 +87,10 @@ export const Subjects = {
   CONVERSATION_ASSIGNED: 'conversation.assigned',
   CONVERSATION_RESOLVED: 'conversation.resolved',
   CONVERSATION_REOPENED: 'conversation.reopened',
+  CONVERSATION_SNOOZED: 'conversation.snoozed',
+
+  // Note
+  NOTE_CREATED: 'conversation.note_created',
 
   // Message
   MESSAGE_INBOUND: 'message.inbound',
