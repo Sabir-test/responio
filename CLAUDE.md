@@ -3,7 +3,7 @@
 ## What This Project Is
 Responio is an AI-powered omnichannel conversation management SaaS platform — a production-quality alternative to respond.io. It targets B2C businesses (50-500 employees) in WhatsApp-first markets (LATAM, SEA, MENA, South Asia).
 
-**Current status**: Early scaffold phase (v0.1.0). Infrastructure and shared packages are functional. Most services are placeholders. Chatwoot fork not yet initialized.
+**Current status**: Active development (v0.1.0). Infrastructure stack is fully operational. All TypeScript services have scaffolded source code (partial business logic). Frontend has working page scaffold. Chatwoot fork not yet initialized.
 
 ---
 
@@ -17,16 +17,23 @@ responio/
 │   └── workflows/ci.yml     # GitHub Actions CI/CD pipeline
 ├── .devcontainer/           # VS Code remote container config
 ├── apps/
-│   ├── web/                 # React 18 + TypeScript + Vite frontend (PLACEHOLDER — no src/ yet)
+│   ├── web/                 # React 18 + TypeScript + Vite frontend (PARTIAL — pages scaffold)
+│   │   └── src/             # contexts/, layouts/, lib/, pages/, App.tsx, router.tsx, main.tsx
 │   └── mobile/              # React Native (Chatwoot mobile fork — NOT YET INITIALIZED)
 ├── services/
-│   ├── inbox/               # Chatwoot fork (Ruby on Rails) — NOT YET INITIALIZED
-│   ├── workflow/            # Workflow orchestration: n8n bridge, NATS bridge, action handlers (PARTIAL)
-│   ├── ai/                  # AI orchestrator + RAG (PLACEHOLDER)
+│   ├── inbox/               # Chatwoot fork (Ruby on Rails) — NOT YET INITIALIZED (stub only)
+│   ├── workflow/            # n8n bridge, NATS bridge, action handlers (PARTIAL)
+│   │   └── src/             # actions/, bridge/, n8n/, nats/, routes/
+│   ├── ai/                  # AI orchestrator + RAG (PARTIAL — LLM client + NATS listener)
+│   │   └── src/             # llm/, nats/, routes/
 │   ├── billing/             # Stripe billing + MAC metering (PARTIAL)
-│   ├── broadcast/           # Broadcast engine (PLACEHOLDER)
-│   ├── analytics/           # ClickHouse analytics (PLACEHOLDER)
-│   └── gateway/             # API gateway with http-proxy-middleware (PLACEHOLDER)
+│   │   └── src/             # services/, nats/, routes/
+│   ├── broadcast/           # Broadcast scheduler (PARTIAL — scheduler + routes)
+│   │   └── src/             # scheduler/, routes/
+│   ├── analytics/           # ClickHouse analytics (PARTIAL — client + event writer)
+│   │   └── src/             # clickhouse/, nats/, routes/
+│   └── gateway/             # API gateway + auth + WhatsApp webhooks (PARTIAL)
+│       └── src/             # auth/, plugins/, webhooks/
 ├── packages/
 │   ├── types/               # Shared TypeScript types and interfaces (FUNCTIONAL)
 │   ├── events/              # NATS JetStream event publisher/subscriber (FUNCTIONAL)
@@ -34,8 +41,9 @@ responio/
 ├── infrastructure/
 │   ├── docker/
 │   │   ├── docker-compose.infra.yml   # Full local dev stack (13 services)
-│   │   ├── init-scripts/postgres/     # 01-init.sql, 02-schema.sql, 03-workflow-schema.sql
-│   │   └── monitoring/                # prometheus.yml, loki-config.yml
+│   │   ├── init-scripts/postgres/     # 01-init.sql, 02-schema.sql, 03-workflow-schema.sql, 04-services-schema.sql
+│   │   ├── init-scripts/clickhouse/   # 01-schema.sql
+│   │   └── monitoring/                # prometheus.yml, loki-config.yml, grafana/
 │   ├── k8s/                 # Kubernetes manifests (EMPTY — Phase 2+)
 │   └── terraform/           # IaC (DEFERRED — Phase 3)
 ├── docs/
@@ -77,8 +85,8 @@ responio/
 | Linting | ESLint | 8.57 |
 | Formatting | Prettier | 3.2 |
 | Build Orchestration | Turbo | 2.0 |
-| Package Manager | pnpm | >=9.0.0 |
-| Runtime | Node.js | >=20.0.0 |
+| Package Manager | pnpm | >=9.0.0 (CI uses pnpm 10) |
+| Runtime | Node.js | >=20.0.0 (CI uses Node 24) |
 | Monitoring | Grafana + Prometheus + Loki | Local stack |
 | Auth (planned) | Authentik (SSO/OIDC) | Not yet deployed |
 | CI/CD | GitHub Actions + ArgoCD | ci.yml configured |
@@ -145,11 +153,13 @@ Exit criteria: Paying Starter-tier customers on WhatsApp + web chat.
 ### Epic Status
 | Epic | Stories | Status |
 |------|---------|--------|
-| 1. Infrastructure Foundation | docker-compose, RLS, NATS, CI/CD | IN PROGRESS |
+| 1. Infrastructure Foundation | docker-compose, RLS, NATS, CI/CD | COMPLETE (infra stack operational, CI pipeline live) |
 | 2. Chatwoot Fork | fork setup, contacts, SLA, web widget | TODO (blocked: fork not initialized) |
-| 3. WhatsApp Integration | BSP access, 360dialog adapter, webhooks | TODO (**CRITICAL: start BSP application NOW** — 2-4 week approval) |
-| 4. Stripe Billing | checkout, MAC metering | IN PROGRESS |
-| 5. Mobile App | React Native fork | TODO |
+| 3. WhatsApp Integration | BSP access, 360dialog adapter, webhooks | IN PROGRESS (gateway webhooks + adapter stub exist; BSP approval critical) |
+| 4. Stripe Billing | checkout, MAC metering | IN PROGRESS (stripe-client + mac-metering scaffolded) |
+| 5. AI Agents & Knowledge Base | LLM client, RAG, agent executor | IN PROGRESS (LLM client + NATS listener scaffolded) |
+| 6. Frontend Web App | dashboard, conversations, contacts, billing pages | IN PROGRESS (pages scaffold exists, no real data binding) |
+| 7. Mobile App | React Native fork | TODO (not initialized) |
 
 ---
 
@@ -187,6 +197,7 @@ Key files:
 - `services/workflow/src/n8n/client.ts` — n8n REST API client
 - `services/workflow/src/n8n/translator.ts` — React Flow ↔ n8n JSON translation
 - `services/workflow/src/bridge/nats-bridge.ts` — NATS event → n8n trigger
+- `services/workflow/src/nats/execution-tracker.ts` — Workflow execution status tracking
 - `services/workflow/src/actions/handlers.ts` — Platform action endpoints (called by n8n)
 - `services/workflow/src/routes/workflows.ts` — Workflow CRUD routes
 
@@ -281,10 +292,67 @@ Docker images pushed to: `ghcr.io/responio/{service}:{branch/sha/latest}`
 
 Initialized by `infrastructure/docker/init-scripts/postgres/`:
 - **01-init.sql** — Extensions (uuid-ossp, vector, pg_trgm, pgcrypto), roles (responio_app, responio_admin)
-- **02-schema.sql** — Core tables: tenant_accounts, conversations, messages, contacts, inboxes, channels, agents, workflow_definitions, workflow_executions — all with RLS policies
-- **03-workflow-schema.sql** — Workflow-specific tables
+- **02-schema.sql** — Core tables: tenant_accounts, workspaces, conversations, messages, contacts, inboxes, channels, agents, workflow_definitions, workflow_executions — all with RLS policies
+- **03-workflow-schema.sql** — Workflow-specific tables (workflow runs, step logs)
+- **04-services-schema.sql** — Service-specific tables: ai_agents, knowledge_bases, knowledge_chunks (pgvector), broadcasts, broadcast_recipients
+
+ClickHouse analytics schema: `infrastructure/docker/init-scripts/clickhouse/01-schema.sql`
 
 All tables use `gen_random_uuid()` for PKs and include `tenant_id UUID NOT NULL` with RLS policy.
+
+---
+
+## Service Implementation Map
+
+A quick reference for what exists in each service's `src/`:
+
+### services/workflow
+- `src/n8n/client.ts` — n8n REST API client (create/activate/delete workflows)
+- `src/n8n/translator.ts` — React Flow node graph ↔ n8n JSON translation
+- `src/bridge/nats-bridge.ts` — NATS JetStream → n8n webhook trigger
+- `src/nats/execution-tracker.ts` — Track workflow execution status via NATS
+- `src/actions/handlers.ts` — Action endpoints called by n8n HTTP nodes
+- `src/routes/workflows.ts` — Workflow CRUD REST routes
+- `src/index.ts` — Fastify server entry point
+
+### services/billing
+- `src/services/stripe-client.ts` — Stripe SDK wrapper (customers, subscriptions, checkout)
+- `src/services/mac-metering.ts` — Monthly Active Contacts metering + overage calculation
+- `src/nats/` — NATS billing event listeners
+- `src/routes/checkout.ts` — Stripe checkout session creation
+- `src/routes/usage.ts` — Usage/metering query endpoints
+- `src/routes/webhooks.ts` — Stripe webhook receiver (signature verification)
+
+### services/ai
+- `src/llm/` — LLM client (LiteLLM proxy + OpenAI SDK)
+- `src/nats/` — NATS agent event listeners
+- `src/routes/` — Agent execution + internal endpoints
+
+### services/gateway
+- `src/auth/routes.ts` — Auth endpoints (register/login, Argon2 password hashing, JWT issue)
+- `src/webhooks/whatsapp.ts` — WhatsApp webhook receiver (360dialog signature verification)
+- `src/plugins/` — Fastify plugins (JWT, proxy middleware)
+
+### services/broadcast
+- `src/scheduler/` — Broadcast job scheduler (Redis-backed queue)
+- `src/routes/` — Broadcast CRUD + send endpoints
+
+### services/analytics
+- `src/clickhouse/` — ClickHouse client wrapper
+- `src/nats/` — NATS event → ClickHouse writer
+- `src/routes/` — Metrics query endpoints
+
+### apps/web (React pages)
+- `src/pages/login.tsx` — Auth login page
+- `src/pages/dashboard.tsx` — Main dashboard
+- `src/pages/conversations.tsx` — Conversation list/view
+- `src/pages/contacts.tsx` — Contact management
+- `src/pages/workflows.tsx` — Workflow builder (React Flow placeholder)
+- `src/pages/billing.tsx` — Billing/subscription page
+- `src/layouts/app-layout.tsx` — Authenticated app shell
+- `src/layouts/auth-layout.tsx` — Unauthenticated layout
+- `src/contexts/auth-context.tsx` — JWT auth context provider
+- `src/router.tsx` — React Router route definitions
 
 ---
 
