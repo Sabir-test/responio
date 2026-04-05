@@ -322,8 +322,30 @@ export function registerActionRoutes(
   });
 
   app.post('/api/v1/actions/snooze-conversation', async (request, reply) => {
+    const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = snoozeSchema.parse(request.body);
-    // TODO: update DB via inbox service
+
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
+    await db('conversations')
+      .where({ id: body.conversation_id, tenant_id: tenantId })
+      .update({ status: 'snoozed', snoozed_until: body.snooze_until, updated_at: db.fn.now() });
+
+    await publisher.publish(Subjects.CONVERSATION_SNOOZED, {
+      tenant_id: tenantId,
+      workspace_id: ctx.workspace_id,
+      source_service: 'workflow',
+      payload: {
+        conversation_id: body.conversation_id,
+        snoozed_until: body.snooze_until,
+        contact_id: ctx.contact_id,
+        snoozed_by: 'workflow',
+      },
+    });
+
     return reply.send({ conversation_id: body.conversation_id, snoozed_until: body.snooze_until });
   });
 
@@ -335,9 +357,40 @@ export function registerActionRoutes(
   });
 
   app.post('/api/v1/actions/create-note', async (request, reply) => {
+    const tenantId = (request as unknown as { tenantId: string }).tenantId;
     const body = createNoteSchema.parse(request.body);
+
+    const ctx = await resolveConversationContext(db, tenantId, body.conversation_id);
+    if (!ctx) {
+      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
     const noteId = crypto.randomUUID();
-    // TODO: delegate to inbox service
+    await db('messages').insert({
+      id: noteId,
+      tenant_id: tenantId,
+      conversation_id: body.conversation_id,
+      sender_type: 'system',
+      content: body.content,
+      content_type: 'text',
+      is_internal_note: true,
+      delivery_status: 'sent',
+    });
+
+    await publisher.publish(Subjects.NOTE_CREATED, {
+      tenant_id: tenantId,
+      workspace_id: ctx.workspace_id,
+      source_service: 'workflow',
+      payload: {
+        note_id: noteId,
+        conversation_id: body.conversation_id,
+        contact_id: ctx.contact_id,
+        content: body.content,
+        visibility: body.visibility,
+        created_by: 'workflow',
+      },
+    });
+
     return reply.send({ note_id: noteId });
   });
 
